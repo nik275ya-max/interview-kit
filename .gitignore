@@ -1,0 +1,44 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+env/
+
+# Сборка PyInstaller
+build/
+dist/
+*.spec
+
+# Рабочие данные (появляются при работе программы)
+incoming/*
+!incoming/.gitkeep
+interviews/*
+!interviews/.gitkeep
+
+# Перебивки: видеоконтент не коммитим (генерится через generate_placeholders.py),
+# но README.txt в каждой категории храним.
+interruptions/**/*.mp4
+interruptions/**/*.mov
+interruptions/**/*.mkv
+interruptions/**/*.avi
+interruptions/**/*.webm
+interruptions/**/*.m4v
+
+# Тяжёлые бинарники (ffmpeg качается отдельно — см. bin/README.txt)
+bin/*.exe
+
+# Модели Whisper (тяжёлые, качаются отдельно — см. models/.gitkeep)
+models/*
+!models/.gitkeep
+
+# Локальный конфиг пользователя (config.example.json коммитим)
+config.json
+
+# Временные файлы проверки
+_check_frame*.png
+
+# IDE
+.vscode/
+.idea/

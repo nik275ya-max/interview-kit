@@ -1,0 +1,11 @@
+# GUI
+PyQt6>=6.6
+
+# Распознавание речи (локальный Whisper)
+faster-whisper>=1.0.3
+
+# Мониторинг папки incoming (опционально, для авто-режима)
+watchdog>=4.0
+
+# Сборка в exe
+pyinstaller>=6.3
