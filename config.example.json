@@ -1,5 +1,7 @@
 {
   "polza_api_key": "",
+  "polza_model": "deepseek/deepseek-v4.1-flash-1017",
+  "polza_base_url": "https://polza.ai/api/v1",
   "stt_backend": "whisper_local",
   "whisper_model": "small",
   "whisper_language": "ru",

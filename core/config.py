@@ -9,7 +9,9 @@ from .paths import config_path
 
 @dataclass
 class Config:
-    polza_api_key: str = ""               # не используется в локальном режиме (зарезервировано)
+    polza_api_key: str = ""               # ключ polza.ai для умного монтажа (LLM)
+    polza_model: str = "deepseek/deepseek-v4.1-flash-1017"  # дешёвая быстрая LLM
+    polza_base_url: str = "https://polza.ai/api/v1"
     stt_backend: str = "whisper_local"
     whisper_model: str = "small"          # tiny/base/small/medium/large-v3
     whisper_language: str = "ru"
@@ -22,7 +24,7 @@ class Config:
     output_fps: int = 30
     audio_sample_rate: int = 48000
     audio_channels: int = 2
-    watch_incoming: bool = False          # автопрослушивание папки incoming
+    watch_incoming: bool = False          # автообновление списка incoming
 
     @classmethod
     def load(cls) -> "Config":
@@ -43,5 +45,13 @@ class Config:
             json.dump(asdict(self), f, indent=2, ensure_ascii=False)
 
     def resolution_wh(self) -> tuple[int, int]:
-        w, h = self.output_resolution.lower().split("x")
-        return int(w), int(h)
+        try:
+            w, h = self.output_resolution.lower().split("x", 1)
+            width, height = int(w), int(h)
+            if width <= 0 or height <= 0:
+                raise ValueError
+            return width, height
+        except (TypeError, ValueError):
+            raise ValueError(
+                f"Некорректное разрешение {self.output_resolution!r}; ожидается формат 1920x1080"
+            ) from None

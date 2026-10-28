@@ -33,7 +33,6 @@ if defined FFMPEG (
         --name interview_app ^
         --add-binary "%FFMPEG%;." ^
         --add-data "interruptions;interruptions" ^
-        --add-data "keywords.json;." ^
         --add-data "config.example.json;." ^
         --hidden-import faster_whisper ^
         --collect-all faster_whisper ^
@@ -42,7 +41,6 @@ if defined FFMPEG (
     pyinstaller --noconfirm --onedir --windowed ^
         --name interview_app ^
         --add-data "interruptions;interruptions" ^
-        --add-data "keywords.json;." ^
         --add-data "config.example.json;." ^
         --hidden-import faster_whisper ^
         --collect-all faster_whisper ^

@@ -16,7 +16,6 @@ from typing import Callable, List, Optional, Tuple
 from .config import Config
 from .editor import EditItem, Editor
 from .ffmpeg_wrapper import FFmpeg
-from .keywords import KeywordMatcher
 from .paths import ensure_dirs, ffmpeg_path, interviews_dir
 from .stt import STT, TranscriptSegment
 
@@ -36,7 +35,6 @@ class Pipeline:
         self.progress = progress
         ensure_dirs()
         self.ffmpeg = FFmpeg(ffmpeg_path())
-        self.matcher = KeywordMatcher()
         self.editor = Editor(self.ffmpeg)
         self._stt: Optional[STT] = None
 
@@ -98,7 +96,17 @@ class Pipeline:
             except Exception as ex:
                 self.log(f"  ошибка STT: {ex}")
                 sub = []
-            transcript.extend(sub)
+            # Единицей монтажа является найденный по паузам ответ, а не
+            # внутренние фрагменты Whisper. Так не пропадают смех, короткие
+            # реплики и края ответа, которые VAD не вернул как текст.
+            transcript.append(
+                TranscriptSegment(
+                    index=i,
+                    start=s,
+                    end=e,
+                    text=" ".join(part.text for part in sub if part.text).strip(),
+                )
+            )
             self.progress(0.30 + 0.40 * (i + 1) / n)
 
         # 5. Сохраняем расшифровку
@@ -111,7 +119,7 @@ class Pipeline:
         self.progress(0.72)
 
         # 6. План монтажа
-        plan = self.editor.build_edit_plan(str(raw), transcript, self.matcher)
+        plan = self._build_plan(str(raw), transcript)
         plan_path = folder / "edit_plan.json"
         with open(plan_path, "w", encoding="utf-8") as f:
             json.dump([item.to_dict() for item in plan], f, indent=2, ensure_ascii=False)
@@ -134,6 +142,11 @@ class Pipeline:
         """Собирает итоговое видео по плану."""
         w, h = self.config.resolution_wh()
         final = folder / "final.mp4"
+        if not plan:
+            raise ValueError("План монтажа пуст")
+        # Сохраняем изменения, сделанные пользователем при проверке плана.
+        with open(folder / "edit_plan.json", "w", encoding="utf-8") as f:
+            json.dump([item.to_dict() for item in plan], f, indent=2, ensure_ascii=False)
         self.log("Сборка итогового видео…")
 
         def asm_progress(p: float) -> None:
@@ -154,6 +167,45 @@ class Pipeline:
         return final
 
     # --- утилиты ---
+
+    def _build_plan(self, source_path: str, transcript) -> List[EditItem]:
+        """Строит план монтажа: нейросеть polza.ai решает, что оставить и какие
+        перебивки вставить.
+
+        Если ключ polza.ai не задан или LLM недоступна (сеть, лимиты, разбор
+        ответа), откатываемся к полному плану без перебивок — оставляем все
+        реплики, чтобы пайплайн не падал.
+        """
+        if not self.config.polza_api_key:
+            self.log(
+                "Поле polza_api_key пустое — нейросеть недоступна. "
+                "План: все реплики без перебивок."
+            )
+            return self.editor.build_full_plan(source_path, transcript)
+        try:
+            from .llm import PolzaClient, decide_segments
+
+            client = PolzaClient(
+                self.config.polza_api_key,
+                self.config.polza_model,
+                self.config.polza_base_url,
+            )
+            interruptions = self.editor.list_interruptions()
+            decisions = decide_segments(
+                client, transcript, interruptions, self.log
+            )
+            plan = self.editor.build_edit_plan_llm(
+                decisions, source_path, transcript
+            )
+            inters = sum(1 for it in plan if it.kind == "interruption")
+            self.log(
+                f"План по LLM ({self.config.polza_model}): "
+                f"элементов {len(plan)}, перебивок {inters}"
+            )
+            return plan
+        except Exception as ex:  # noqa: BLE001 — любой сбой LLM -> откат
+            self.log(f"LLM-монтаж недоступен ({ex}); оставляем все реплики без перебивок")
+            return self.editor.build_full_plan(source_path, transcript)
 
     def _make_interview_folder(self, guest_name: str) -> Path:
         date_str = time.strftime("%Y-%m-%d")

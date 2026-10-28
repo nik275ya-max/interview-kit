@@ -9,7 +9,9 @@ from typing import List, Tuple
 
 
 class FFmpegError(Exception):
-    pass
+    def __init__(self, message: str, returncode: int | None = None):
+        super().__init__(message)
+        self.returncode = returncode
 
 
 class FFmpeg:
@@ -18,7 +20,7 @@ class FFmpeg:
 
     # --- низкоуровневый запуск ---
 
-    def _run(self, args: List[str], need_log: bool = True) -> str:
+    def _run(self, args: List[str], check: bool = True) -> str:
         cmd = [self.exe, *args]
         proc = subprocess.run(
             cmd,
@@ -28,15 +30,20 @@ class FFmpeg:
             errors="replace",
             creationflags=subprocess.CREATE_NO_WINDOW if _is_windows() else 0,
         )
-        if proc.returncode != 0:
+        if check and proc.returncode != 0:
             tail = (proc.stderr or proc.stdout)[-2000:]
-            raise FFmpegError(f"ffmpeg failed (code {proc.returncode}):\n{tail}")
+            raise FFmpegError(
+                f"ffmpeg failed (code {proc.returncode}):\n{tail}",
+                returncode=proc.returncode,
+            )
         return (proc.stderr or "") + (proc.stdout or "")
 
     # --- информация о файле ---
 
     def probe_duration(self, media_path: str) -> float:
-        log = self._run(["-i", media_path])
+        # `ffmpeg -i file` prints media information and then returns code 1
+        # because no output was specified.  That is expected for a probe.
+        log = self._run(["-hide_banner", "-i", media_path], check=False)
         m = re.search(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)", log)
         if not m:
             raise FFmpegError("Не удалось определить длительность")
@@ -44,9 +51,16 @@ class FFmpeg:
         return int(h) * 3600 + int(mn) * 60 + float(s)
 
     def probe_fps(self, video_path: str) -> float:
-        log = self._run(["-i", video_path])
+        log = self._run(["-hide_banner", "-i", video_path], check=False)
         m = re.search(r"(\d+(?:\.\d+)?)\s*fps\b", log)
         return float(m.group(1)) if m else 30.0
+
+    def has_audio(self, media_path: str) -> bool:
+        """Проверяет наличие аудиопотока без зависимости от ffprobe."""
+        log = self._run(["-hide_banner", "-i", media_path], check=False)
+        # Между индексом потока и `Audio:` могут быть язык и метаданные,
+        # например `Stream #0:1(und): Audio: aac`.
+        return bool(re.search(r"Stream\s+#.*\bAudio:", log))
 
     # --- аудио ---
 
@@ -171,17 +185,26 @@ class FFmpeg:
             f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=black,"
             f"fps={fps},format=yuv420p"
         )
-        self._run(
-            [
-                "-y", "-i", input_path,
+        args = ["-y", "-i", input_path]
+        if self.has_audio(input_path):
+            args += ["-map", "0:v:0", "-map", "0:a:0"]
+        else:
+            # У всех нормализованных файлов должен быть одинаковый набор
+            # потоков, иначе concat теряет звук после немой перебивки.
+            args += [
+                "-f", "lavfi", "-i",
+                f"anullsrc=channel_layout={'mono' if channels == 1 else 'stereo'}:sample_rate={sample_rate}",
+                "-map", "0:v:0", "-map", "1:a:0",
+            ]
+        args += [
                 "-vf", vf,
                 "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
                 "-c:a", "aac", "-b:a", "192k",
                 "-ar", str(sample_rate), "-ac", str(channels),
                 "-shortest",
                 out_path,
-            ]
-        )
+        ]
+        self._run(args)
 
     def cut_and_normalize(
         self,
@@ -201,18 +224,24 @@ class FFmpeg:
             f"pad={width}:{height}:(ow-iw)/2:(oh-ih)/2:color=black,"
             f"fps={fps},format=yuv420p"
         )
-        self._run(
-            [
-                "-y", "-ss", f"{start:.3f}", "-i", video_path,
-                "-t", f"{end - start:.3f}",
-                "-vf", vf,
-                "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
-                "-c:a", "aac", "-b:a", "192k",
-                "-ar", str(sample_rate), "-ac", str(channels),
-                "-shortest",
-                out_path,
+        args = ["-y", "-ss", f"{start:.3f}", "-i", video_path]
+        if self.has_audio(video_path):
+            args += ["-map", "0:v:0", "-map", "0:a:0"]
+        else:
+            args += [
+                "-f", "lavfi", "-i",
+                f"anullsrc=channel_layout={'mono' if channels == 1 else 'stereo'}:sample_rate={sample_rate}",
+                "-map", "0:v:0", "-map", "1:a:0",
             ]
-        )
+        args += [
+            "-t", f"{end - start:.3f}",
+            "-vf", vf,
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+            "-c:a", "aac", "-b:a", "192k",
+            "-ar", str(sample_rate), "-ac", str(channels),
+            "-shortest", out_path,
+        ]
+        self._run(args)
 
     def concat(self, list_file: str, out_path: str, copy: bool = True) -> None:
         args = ["-y", "-f", "concat", "-safe", "0", "-i", list_file]

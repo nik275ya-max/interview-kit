@@ -48,7 +48,6 @@ from core.paths import (
     incoming_dir,
     interviews_dir,
     interruptions_dir,
-    keywords_path,
 )
 from core.pipeline import Pipeline
 
@@ -63,6 +62,10 @@ class WorkerSignals(QObject):
     finished_ok = pyqtSignal(str)
     failed = pyqtSignal(str)
     ready_for_review = pyqtSignal(object, list)  # folder: Path, plan: List[EditItem]
+
+
+class IncomingSignals(QObject):
+    changed = pyqtSignal()
 
 
 class PrepareWorker(QThread):
@@ -132,10 +135,8 @@ class PlanItemWidget(QWidget):
         if item.kind == "segment":
             mm_ss_start = _fmt_ts(item.start)
             mm_ss_end = _fmt_ts(item.end)
-            cats = ", ".join(item.categories) if item.categories else "—"
             title = QLabel(
-                f"<b>[{mm_ss_start} – {mm_ss_end}] Ответ</b> "
-                f"<span style='color:#888'>(категории: {cats})</span>"
+                f"<b>[{mm_ss_start} – {mm_ss_end}] Ответ</b>"
             )
             title.setWordWrap(True)
             body = QLabel(item.text)
@@ -148,9 +149,8 @@ class PlanItemWidget(QWidget):
             lay.addStretch(1)
         else:
             name = os.path.basename(item.source_path)
-            cats = ", ".join(item.categories)
             lbl = QLabel(
-                f"<b>🎬 Перебивка</b> <span style='color:#2a7'>({cats})</span> — {name}"
+                f"<b>🎬 Перебивка</b> — {name}"
             )
             lbl.setWordWrap(True)
             lay.addWidget(lbl)
@@ -183,6 +183,9 @@ class MainWindow(QMainWindow):
         self.current_folder: Path | None = None
         self.current_plan: List[EditItem] = []
         self.worker: QThread | None = None
+        self._observer = None
+        self._incoming_signals = IncomingSignals()
+        self._incoming_signals.changed.connect(self.refresh_files)
 
         tabs = QTabWidget()
         tabs.addTab(self._build_process_tab(), "Обработка")
@@ -194,6 +197,7 @@ class MainWindow(QMainWindow):
             "QMainWindow { background: #fafafa; }"
             "QTextEdit { font-family: Consolas, 'Courier New'; font-size: 12px; }"
         )
+        self._configure_watcher()
 
     # --- вкладка «Обработка» ---
 
@@ -205,6 +209,7 @@ class MainWindow(QMainWindow):
         v.addWidget(QLabel("<b>Файлы в папке incoming:</b>"))
         self.file_list = QListWidget()
         self.file_list.setSelectionMode(QListWidget.SelectionMode.SingleSelection)
+        self.file_list.itemSelectionChanged.connect(self._clear_browsed_path)
         v.addWidget(self.file_list, 1)
 
         row = QHBoxLayout()
@@ -297,6 +302,15 @@ class MainWindow(QMainWindow):
         self.cb_whisper_model.addItems(["tiny", "base", "small", "medium", "large-v3"])
         form.addRow("Модель Whisper:", self.cb_whisper_model)
 
+        self.cb_whisper_device = QComboBox()
+        self.cb_whisper_device.addItems(["cpu", "cuda"])
+        form.addRow("Устройство Whisper:", self.cb_whisper_device)
+
+        self.cb_compute_type = QComboBox()
+        self.cb_compute_type.addItems(["int8", "float16", "float32"])
+        self.cb_compute_type.setEditable(True)
+        form.addRow("Точность вычислений:", self.cb_compute_type)
+
         self.le_language = QLineEdit("ru")
         form.addRow("Язык распознавания:", self.le_language)
 
@@ -326,23 +340,21 @@ class MainWindow(QMainWindow):
         self.spin_fps.setRange(10, 60)
         form.addRow("FPS выхода:", self.spin_fps)
 
-        self.chk_watch = QCheckBox("Автоматически обрабатывать новые файлы в incoming")
+        self.chk_watch = QCheckBox("Автоматически обновлять список файлов в incoming")
         form.addRow("", self.chk_watch)
 
         btn_save = QPushButton("Сохранить настройки")
         btn_save.clicked.connect(self.save_settings)
         form.addRow("", btn_save)
 
-        btn_edit_keywords = QPushButton("Открыть keywords.json")
-        btn_edit_keywords.clicked.connect(lambda: _open_file(keywords_path()))
-        form.addRow("", btn_edit_keywords)
-
-        btn_open_interruptions = QPushButton("Открыть папку interruptions")
+        btn_open_interruptions = QPushButton("Открыть папку перебивок")
         btn_open_interruptions.clicked.connect(lambda: _open_folder(interruptions_dir()))
         form.addRow("", btn_open_interruptions)
 
         self._settings_widgets = {
             "whisper_model": self.cb_whisper_model,
+            "whisper_device": self.cb_whisper_device,
+            "whisper_compute_type": self.cb_compute_type,
             "whisper_language": self.le_language,
             "silence_db": self.spin_silence_db,
             "silence_min_duration": self.spin_silence_dur,
@@ -357,6 +369,8 @@ class MainWindow(QMainWindow):
     def _load_settings_into_ui(self):
         c = self.config
         self.cb_whisper_model.setCurrentText(c.whisper_model)
+        self.cb_whisper_device.setCurrentText(c.whisper_device)
+        self.cb_compute_type.setCurrentText(c.whisper_compute_type)
         self.le_language.setText(c.whisper_language)
         self.spin_silence_db.setValue(c.silence_db)
         self.spin_silence_dur.setValue(c.silence_min_duration)
@@ -368,6 +382,8 @@ class MainWindow(QMainWindow):
     def save_settings(self):
         c = self.config
         c.whisper_model = self.cb_whisper_model.currentText()
+        c.whisper_device = self.cb_whisper_device.currentText()
+        c.whisper_compute_type = self.cb_compute_type.currentText()
         c.whisper_language = self.le_language.text().strip() or "ru"
         c.silence_db = self.spin_silence_db.value()
         c.silence_min_duration = self.spin_silence_dur.value()
@@ -376,17 +392,22 @@ class MainWindow(QMainWindow):
         c.output_fps = self.spin_fps.value()
         c.watch_incoming = self.chk_watch.isChecked()
         c.save()
+        self._configure_watcher()
         QMessageBox.information(self, "Настройки", "Настройки сохранены в config.json")
 
     # --- действия ---
 
     def refresh_files(self):
+        selected = self.file_list.currentItem()
+        selected_name = selected.text() if selected else None
         self.file_list.clear()
         d = incoming_dir()
         d.mkdir(parents=True, exist_ok=True)
         for f in sorted(d.iterdir()):
             if f.is_file() and f.suffix.lower() in (".mp4", ".mov", ".mkv", ".avi", ".webm", ".m4v"):
                 self.file_list.addItem(QListWidgetItem(f.name))
+                if f.name == selected_name:
+                    self.file_list.setCurrentRow(self.file_list.count() - 1)
 
     def browse_file(self):
         path, _ = QFileDialog.getOpenFileName(
@@ -399,6 +420,12 @@ class MainWindow(QMainWindow):
             self.file_list.addItem(QListWidgetItem(os.path.basename(path)))
             self._browsed_path = path
             self.guest_edit.setText(Path(path).stem)
+
+    def _clear_browsed_path(self):
+        # Смена выбора после диалога означает, что пользователь выбрал файл
+        # из incoming, а не ранее указанный внешний путь.
+        if self.file_list.hasFocus():
+            self._browsed_path = None
 
     def _selected_video_path(self) -> str | None:
         if hasattr(self, "_browsed_path") and self._browsed_path:
@@ -441,6 +468,7 @@ class MainWindow(QMainWindow):
     def _on_failed(self, msg: str):
         self.log_view.append(f"\n❌ Ошибка: {msg}")
         self.btn_prepare.setEnabled(True)
+        self.btn_assemble.setEnabled(bool(self.current_folder and self.current_plan))
         self.worker = None
 
     def _on_ready_for_review(self, folder: Path, plan: list):
@@ -481,11 +509,9 @@ class MainWindow(QMainWindow):
         item = self.current_plan[idx]
         if item.kind != "interruption":
             return
-        for cat in item.categories:
-            files = Editor.list_interruptions(cat)
-            if files:
-                item.source_path = random.choice(files)
-                break
+        files = Editor.list_interruptions()
+        alternatives = [path for path in files if path != item.source_path]
+        item.source_path = random.choice(alternatives or files) or item.source_path
         self._populate_review()
 
     def start_assemble(self):
@@ -500,6 +526,48 @@ class MainWindow(QMainWindow):
         self.worker.signals.finished_ok.connect(self._on_assemble_done)
         self.worker.signals.failed.connect(self._on_failed)
         self.worker.start()
+
+    def _configure_watcher(self):
+        """Включает или выключает наблюдение за папкой incoming."""
+        if self._observer is not None:
+            self._observer.stop()
+            self._observer.join(timeout=2)
+            self._observer = None
+        if not self.config.watch_incoming:
+            return
+        try:
+            from watchdog.events import FileSystemEventHandler
+            from watchdog.observers import Observer
+
+            emit_changed = self._incoming_signals.changed.emit
+
+            class Handler(FileSystemEventHandler):
+                def on_created(self, event):
+                    if not event.is_directory:
+                        emit_changed()
+
+                def on_deleted(self, event):
+                    if not event.is_directory:
+                        emit_changed()
+
+                def on_moved(self, event):
+                    if not event.is_directory:
+                        emit_changed()
+
+            observer = Observer()
+            observer.schedule(Handler(), str(incoming_dir()), recursive=False)
+            observer.start()
+            self._observer = observer
+        except Exception as ex:
+            self.log_view.append(f"⚠ Не удалось включить наблюдение за incoming: {ex}")
+            self.chk_watch.setChecked(False)
+
+    def closeEvent(self, event):
+        if self._observer is not None:
+            self._observer.stop()
+            self._observer.join(timeout=2)
+            self._observer = None
+        super().closeEvent(event)
 
     def _on_assemble_done(self, final_path: str):
         self.log_view.append(f"\n✅ Готово: {final_path}")
@@ -520,26 +588,6 @@ class MainWindow(QMainWindow):
 def _open_folder(path: Path):
     path = Path(path)
     path.mkdir(parents=True, exist_ok=True)
-    if sys.platform.startswith("win"):
-        os.startfile(str(path))  # type: ignore[attr-defined]
-    elif sys.platform == "darwin":
-        os.system(f'open "{path}"')
-    else:
-        os.system(f'xdg-open "{path}"')
-
-
-def _open_file(path: Path):
-    path = Path(path)
-    if not path.exists():
-        # если нет — создаём пустой/шаблонный, чтобы можно было редактировать
-        if path.name == "keywords.json":
-            path.write_text(
-                '{\n  "любовь": ["love"],\n  "свадьба": ["wedding"],\n'
-                '  "алкоголь": ["alcohol"],\n  "деньги": ["money"]\n}\n',
-                encoding="utf-8",
-            )
-        else:
-            path.touch()
     if sys.platform.startswith("win"):
         os.startfile(str(path))  # type: ignore[attr-defined]
     elif sys.platform == "darwin":

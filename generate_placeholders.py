@@ -1,7 +1,8 @@
 """Генератор тестовых видео-перебивок (текстовые карточки на чёрном фоне).
 
-Создаёт по одному placeholder.mp4 в каждой категории папки interruptions/.
-Полезно для проверки пайплайна, пока нет настоящих мемов.
+Создаёт по одному placeholder-видео в общей папке interruptions/ (все
+перебивки лежат в одной папке, без категорий-подпапок). Полезно для проверки
+пайплайна, пока нет настоящих мемов.
 
 Перебивки: 1920x1080, 3 сек, 30 fps, со звуком (тишина) — полностью
 совместимы с пайплайном монтажа. Кириллица рендерится через arial.ttf.
@@ -19,18 +20,19 @@ from pathlib import Path
 
 from core.paths import ffmpeg_path, interruptions_dir
 
-# Категория -> русская фраза на карточке.
+# Имя файла (без расширения) -> русская фраза на карточке.
+# Имя файла — это то, по чему нейросеть выбирает перебивку, поэтому описательное.
 # Без эмодзи (drawtext + arial.ttf их не отрисует цветом).
 PHRASES = {
-    "love": "Любовь зла...",
-    "romantic": "Романтика!",
-    "wedding": "ГОРЬКО!",
-    "alcohol": "Za здоровье!",
-    "party": "Танцуют все!",
-    "money": "Деньги решают!",
-    "funny": "Ну вы даёте!",
-    "family": "Семья — святое",
-    "travel": "Поехали!",
+    "lyubov_zla": "Любовь зла...",
+    "romantika": "Романтика!",
+    "gorko": "ГОРЬКО!",
+    "zdorovye": "Za здоровье!",
+    "tantsuyut_vse": "Танцуют все!",
+    "deneg_reshayut": "Деньги решают!",
+    "nu Vy_dayote": "Ну вы даёте!",
+    "semya_svyatoe": "Семья — святое",
+    "pokhali": "Поехали!",
 }
 
 # Шрифт с поддержкой кириллицы.
@@ -102,17 +104,15 @@ def main() -> int:
     out_root = interruptions_dir()
     out_root.mkdir(parents=True, exist_ok=True)
     ok, fail = 0, 0
-    for cat, phrase in PHRASES.items():
-        cat_dir = out_root / cat
-        cat_dir.mkdir(exist_ok=True)
-        out = cat_dir / "placeholder.mp4"
+    for name, phrase in PHRASES.items():
+        out = out_root / f"{name}.mp4"
         try:
             make_placeholder(ffmpeg_exe, font, phrase, out)
             size_kb = out.stat().st_size // 1024
-            print(f"[OK]   {cat:10s} -> {out}  ({size_kb} KB)  «{phrase}»")
+            print(f"[OK]   {name:16s} -> {out}  ({size_kb} KB)  «{phrase}»")
             ok += 1
         except Exception as ex:
-            print(f"[FAIL] {cat:10s} -> {ex}")
+            print(f"[FAIL] {name:16s} -> {ex}")
             fail += 1
     print(f"\nГотово: {ok} успешно, {fail} с ошибкой.")
     return 0 if fail == 0 else 1
