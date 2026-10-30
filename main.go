@@ -468,19 +468,29 @@ func (a *App) assemble(w http.ResponseWriter, r *http.Request) {
 	var concat strings.Builder
 	for i, item := range p.Items {
 		out := filepath.Join(tmp, fmt.Sprintf("clip_%04d.mp4", i))
-		args := []string{"-nostdin", "-hide_banner", "-loglevel", "warning", "-threads", "1", "-filter_threads", "1", "-y"}
+		baseArgs := []string{"-nostdin", "-hide_banner", "-loglevel", "warning", "-threads", "1", "-filter_threads", "1", "-y"}
+		args := append([]string(nil), baseArgs...)
+		var retryArgs []string
+		hasSourceAudio := false
 		if item.Kind == "segment" {
 			if item.End <= item.Start || !within(filepath.Join(a.root, "interviews"), item.SourcePath) {
 				fail(w, errors.New("неверный исходный сегмент"), 400)
 				return
 			}
-			args = append(args, "-ss", fmt.Sprintf("%.3f", item.Start), "-i", item.SourcePath)
-			if hasAudio(a, item.SourcePath) {
+			start := fmt.Sprintf("%.3f", item.Start)
+			args = append(args, "-ss", start, "-i", item.SourcePath)
+			retryArgs = append(append([]string(nil), baseArgs...), "-i", item.SourcePath, "-ss", start)
+			hasSourceAudio = hasAudio(a, item.SourcePath)
+			if hasSourceAudio {
 				args = append(args, "-map", "0:v:0", "-map", "0:a:0")
+				retryArgs = append(retryArgs, "-map", "0:v:0", "-map", "0:a:0")
 			} else {
 				args = append(args, "-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=48000", "-map", "0:v:0", "-map", "1:a:0")
+				retryArgs = append(retryArgs, "-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=48000", "-map", "0:v:0", "-map", "1:a:0")
 			}
-			args = append(args, "-t", fmt.Sprintf("%.3f", item.End-item.Start), "-vf", videoFilter, "-c:v", "libx264", "-threads:v", "1", "-preset", "veryfast", "-crf", "20", "-c:a", "aac", "-threads:a", "1", "-ar", "48000", "-ac", "2", "-shortest")
+			encodeArgs := []string{"-t", fmt.Sprintf("%.3f", item.End-item.Start), "-vf", videoFilter, "-c:v", "libx264", "-threads:v", "1", "-preset", "veryfast", "-crf", "20", "-c:a", "aac", "-threads:a", "1", "-ar", "48000", "-ac", "2", "-shortest"}
+			args = append(args, encodeArgs...)
+			retryArgs = append(retryArgs, encodeArgs...)
 		} else {
 			if !within(filepath.Join(a.root, "interruptions"), item.SourcePath) {
 				fail(w, errors.New("перебивка должна находиться в interruptions"), 400)
@@ -495,9 +505,22 @@ func (a *App) assemble(w http.ResponseWriter, r *http.Request) {
 			args = append(args, "-vf", videoFilter, "-c:v", "libx264", "-threads:v", "1", "-preset", "veryfast", "-crf", "20", "-c:a", "aac", "-threads:a", "1", "-ar", "48000", "-ac", "2", "-shortest")
 		}
 		args = append(args, out)
+		if retryArgs != nil {
+			retryArgs = append(retryArgs, out)
+		}
 		if _, err := a.run(r.Context(), args...); err != nil {
-			fail(w, err, 500)
-			return
+			if retryArgs == nil {
+				fail(w, err, 500)
+				return
+			}
+			_ = os.Remove(out)
+			if _, retryErr := a.run(r.Context(), retryArgs...); retryErr != nil {
+				_ = os.Remove(out)
+				if splitErr := a.renderSegmentSplit(r.Context(), item, out, hasSourceAudio); splitErr != nil {
+					fail(w, fmt.Errorf("обычная и раздельная сборка фрагмента не удались: %w", splitErr), 500)
+					return
+				}
+			}
 		}
 		concat.WriteString("file '")
 		concat.WriteString(strings.ReplaceAll(strings.ReplaceAll(out, "\\", "/"), "'", "'\\''"))
@@ -516,6 +539,32 @@ func (a *App) assemble(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	jsonOut(w, map[string]string{"output": final})
+}
+
+func (a *App) renderSegmentSplit(ctx context.Context, item Item, out string, sourceHasAudio bool) error {
+	duration := fmt.Sprintf("%.3f", item.End-item.Start)
+	start := fmt.Sprintf("%.3f", item.Start)
+	video := out + ".video.mp4"
+	audio := out + ".audio.m4a"
+	defer os.Remove(video)
+	defer os.Remove(audio)
+	common := []string{"-nostdin", "-hide_banner", "-loglevel", "warning", "-threads", "1", "-filter_threads", "1", "-y"}
+	videoArgs := append(append([]string(nil), common...), "-i", item.SourcePath, "-ss", start, "-map", "0:v:0", "-t", duration, "-an", "-vf", videoFilter, "-c:v", "libx264", "-threads:v", "1", "-preset", "veryfast", "-crf", "20", video)
+	if _, err := a.run(ctx, videoArgs...); err != nil {
+		return err
+	}
+	var audioArgs []string
+	if sourceHasAudio {
+		audioArgs = append(append([]string(nil), common...), "-i", item.SourcePath, "-ss", start, "-map", "0:a:0", "-t", duration, "-vn", "-c:a", "aac", "-threads:a", "1", "-ar", "48000", "-ac", "2", audio)
+	} else {
+		audioArgs = append(append([]string(nil), common...), "-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=48000", "-t", duration, "-c:a", "aac", "-threads:a", "1", audio)
+	}
+	if _, err := a.run(ctx, audioArgs...); err != nil {
+		return err
+	}
+	muxArgs := []string{"-nostdin", "-hide_banner", "-loglevel", "warning", "-threads", "1", "-y", "-i", video, "-i", audio, "-map", "0:v:0", "-map", "1:a:0", "-c", "copy", "-shortest", out}
+	_, err := a.run(ctx, muxArgs...)
+	return err
 }
 
 func repairTimeline(p *Project) {
