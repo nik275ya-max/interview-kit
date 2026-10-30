@@ -1,6 +1,7 @@
-Положите сюда ffmpeg.exe (и ffprobe.exe при желании).
+Запустите install_runtime.bat из корня проекта. Он скачает:
 
-Скачать: https://www.gyan.dev/ffmpeg/builds/  →  "release full"  →  распаковать  →
-взять bin/ffmpeg.exe и положить в эту папку как bin\ffmpeg.exe.
+- bin\ffmpeg.exe;
+- bin\whisper\Release\whisper-cli.exe и необходимые DLL;
+- models\ggml-small-q5_1.bin.
 
-Без ffmpeg.exe программа попытается использовать системный ffmpeg из PATH.
+Тяжёлые runtime-файлы не хранятся в Git.

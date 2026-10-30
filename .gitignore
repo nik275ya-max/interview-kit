@@ -28,6 +28,7 @@ interruptions/**/*.m4v
 
 # Тяжёлые бинарники (ffmpeg качается отдельно — см. bin/README.txt)
 bin/*.exe
+bin/whisper/
 
 # Модели Whisper (тяжёлые, качаются отдельно — см. models/.gitkeep)
 models/*
